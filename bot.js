@@ -10,7 +10,7 @@ const crypto = require('crypto');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('Missing TELEGRAM_BOT_TOKEN');
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const BTC_WALLET = 'bc1q772uueqj2zev3vrc4hmvm8stnc3zksed0p4hmk';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number).filter(Boolean);
 const ALLOWED_IDS = (process.env.ALLOWED_IDS || '').split(',').map(Number).filter(Boolean);
@@ -36,7 +36,9 @@ function loadGS() { try { if (fs.existsSync(gsf())) return JSON.parse(fs.readFil
 function saveGS(d) { fs.writeFileSync(gsf(), JSON.stringify(d, null, 2)); }
 let GS = loadGS();
 
-// ============ BINANCE ============
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// BINANCE
 async function getPrice(s) { try { const r = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=' + s, { timeout: 3000 }); return parseFloat(r.data.price); } catch (e) { return null; } }
 async function get24hr(s) { try { const r = await axios.get('https://api.binance.com/api/v3/ticker/24hr?symbol=' + s, { timeout: 3000 }); return { high: parseFloat(r.data.highPrice), low: parseFloat(r.data.lowPrice), change: parseFloat(r.data.priceChangePercent), volume: parseFloat(r.data.quoteVolume) }; } catch (e) { return null; } }
 async function getKlines(s, i, l) { try { const r = await axios.get('https://api.binance.com/api/v3/klines?symbol=' + s + '&interval=' + i + '&limit=' + l, { timeout: 3000 }); return r.data.map(k => ({ close: parseFloat(k[4]), high: parseFloat(k[2]), low: parseFloat(k[3]), volume: parseFloat(k[5]) })); } catch (e) { return []; } }
@@ -46,31 +48,15 @@ async function getFunding(s) { try { const r = await axios.get('https://fapi.bin
 async function getLSRatio(s) { try { const r = await axios.get('https://fapi.binance.com/fapi/v1/globalLongShortAccountRatio?symbol=' + s + '&period=5m&limit=1', { timeout: 3000 }); const ratio = parseFloat(r.data[0]?.longShortRatio || 1); return { long: ratio.toFixed(1), sentiment: ratio > 1.5 ? 'BEARISH (crowded longs)' : ratio < 0.7 ? 'BULLISH (crowded shorts)' : 'NEUTRAL' }; } catch (e) { return { long: '1.0', sentiment: 'NEUTRAL' }; } }
 async function getOpenInterest(s) { try { const r = await axios.get('https://fapi.binance.com/fapi/v1/openInterest?symbol=' + s, { timeout: 3000 }); return (parseFloat(r.data.openInterest) / 1e9).toFixed(1) + 'B'; } catch (e) { return 'N/A'; } }
 
-// ============ YAHOO STOCKS ============
-async function getStockPrice(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); return r.data.chart.result[0].meta.regularMarketPrice; } catch (e) { return null; } }
-async function getStockData(s) { 
-  try { 
-    const r = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + s, { 
-      params: { interval: "5m", range: "1d" }, 
-      timeout: 5000, 
-      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" } 
-    }); 
-    const q = r.data.chart.result[0].indicators.quote[0]; 
-    const closes = (q.close || []).filter(c => c !== null); 
-    const highs = (q.high || []).filter(h => h !== null); 
-    const lows = (q.low || []).filter(l => l !== null); 
-    return { closes: closes, highs: highs, lows: lows }; 
-  } catch (e) { 
-    console.log("Stock data error:", e.message); 
-    return { closes: [], highs: [], lows: [] }; 
-  } 
-}getStockData(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: q.close.filter(c => c !== null), highs: q.high.filter(h => h !== null), lows: q.low.filter(l => l !== null) }; } catch (e) { return { closes: [], highs: [], lows: [] }; } }
+// YAHOO STOCKS (FIXED)
+async function getStockPrice(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 8000, headers: { 'User-Agent': UA } }); return r.data.chart.result[0].meta.regularMarketPrice; } catch (e) { return null; } }
+async function getStockData(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 8000, headers: { 'User-Agent': UA } }); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: (q.close || []).filter(c => c !== null), highs: (q.high || []).filter(h => h !== null), lows: (q.low || []).filter(l => l !== null) }; } catch (e) { return { closes: [], highs: [], lows: [] }; } }
 
-// ============ FOREX & POLYMARKET ============
+// FOREX & POLYMARKET
 async function fetchForex() { try { const r = await axios.get('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { timeout: 5000 }); const events = []; const today = new Date(); if (Array.isArray(r.data)) { r.data.forEach(e => { const d = new Date(e.date || ''); if (Math.abs(d - today) < 86400000) events.push({ title: e.title || 'Event', country: e.country || 'USD', time: e.time || '', impact: e.impact || 'Medium', forecast: e.forecast || '', previous: e.previous || '' }); }); } return events; } catch (e) { return []; } }
 async function getPolymarket() { try { const r = await axios.get('https://gamma-api.polymarket.com/markets?limit=6&order=volume&ascending=false', { timeout: 5000 }); if (Array.isArray(r.data)) return r.data.slice(0, 6).map(m => ({ title: m.title || m.question || '', volume: (parseFloat(m.volumeNum || m.volume || 0) / 1e6).toFixed(1) + 'M', prices: [m.outcomePrices ? JSON.parse(m.outcomePrices)[0] : '0'].map(p => (parseFloat(p) * 100).toFixed(0) + '%') })); } catch (e) { return null; } }
 
-// ============ TECHNICALS ============
+// TECHNICALS
 function calcRSI(p, per) { per = per || 14; if (p.length < per + 1) return 50; let g = 0, l = 0; for (let i = p.length - per; i < p.length; i++) { let d = p[i] - p[i - 1]; if (d >= 0) g += d; else l -= d; } if (l === 0) return 100; return 100 - (100 / (1 + (g / per) / (l / per))); }
 function calcMACD(prices) { if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0, trend: 'NEUTRAL' }; const ema = (p, per) => { const k = 2 / (per + 1); let e = p[0]; for (let i = 1; i < p.length; i++) e = p[i] * k + e * (1 - k); return e; }; const e12 = ema(prices, 12), e26 = ema(prices, 26); const mv = e12 - e26, sv = ema([mv], 9); return { macd: mv.toFixed(2), signal: sv.toFixed(2), histogram: (mv - sv).toFixed(4), trend: mv > sv ? 'BULLISH' : 'BEARISH' }; }
 function calcSR(prices) { const h = Math.max(...prices), l = Math.min(...prices), c = prices[prices.length - 1]; const pp = (h + l + c) / 3; return { resistance: h.toFixed(2), support: l.toFixed(2), pivot: pp.toFixed(2), r1: (2 * pp - l).toFixed(2), s1: (2 * pp - h).toFixed(2), r2: (pp + (h - l)).toFixed(2), s2: (pp - (h - l)).toFixed(2) }; }
@@ -80,7 +66,7 @@ function calcEMAVal(cl, per) { if (cl.length < per) return cl[cl.length - 1]; co
 function calcEMACross(cl) { const e9 = calcEMAVal(cl, 9); const e21 = calcEMAVal(cl, 21); const e50 = calcEMAVal(cl, 50); const e200 = calcEMAVal(cl, 200); const p9 = calcEMAVal(cl.slice(0, -1), 9); const p21 = calcEMAVal(cl.slice(0, -1), 21); return { ema9: e9.toFixed(2), ema21: e21.toFixed(2), ema50: e50.toFixed(2), ema200: e200.toFixed(2), signal: (p9 <= p21 && e9 > e21) ? 'STRONG BUY' : (p9 >= p21 && e9 < e21) ? 'STRONG SELL' : e9 > e21 ? 'BUY' : 'SELL', slowCross: e50 > e200 ? 'BULLISH' : 'BEARISH' }; }
 function tfVote(tf) { if (!tf || tf.bias === '--' || tf.bias === 'N/A') return 'neutral'; if (tf.bias.includes('BULLISH')) return 'long'; if (tf.bias.includes('BEARISH')) return 'short'; return 'neutral'; }
 
-// ============ CRYPTO SIGNAL ============
+// CRYPTO SIGNAL
 async function genCryptoSignal(symbol) {
   const [price, stats, k5m, k15m, k1h, k4h, depth, funding, lsRatio, oi] = await Promise.all([getPrice(symbol), get24hr(symbol), getKlines(symbol, '5m', 50), getKlines(symbol, '15m', 30), getKlines(symbol, '1h', 50), getKlines(symbol, '4h', 50), getDepth(symbol), getFunding(symbol), getLSRatio(symbol), getOpenInterest(symbol)]);
   if (!price || !depth) return null;
@@ -131,7 +117,7 @@ async function genCryptoSignal(symbol) {
   return { id: crypto.randomBytes(4).toString('hex'), type: 'crypto', symbol, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, trailingSL: (vol * 0.6 * 100).toFixed(1) + '%', score: sc, rsi1h: rsi1h.toFixed(1), rsi4h: rsi4h.toFixed(1), rsi15m: rsi15m.toFixed(1), macd: macd1h, sr, depth, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding, lsRatio, oi, vs: vs.toFixed(1), reasons, warnings, st, ema, tf5m, tf15m, tf1h, tf4h, stats, longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
 }
 
-// ============ STOCK SIGNAL ============
+// STOCK SIGNAL
 async function genStockSignal(symbol) {
   const [price, data] = await Promise.all([getStockPrice(symbol), getStockData(symbol)]);
   if (!price || !data.closes || data.closes.length < 20) return null;
@@ -154,7 +140,7 @@ async function genStockSignal(symbol) {
   return { id: crypto.randomBytes(4).toString('hex'), type: 'stock', symbol, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, score: sc, rsi1h: rsi.toFixed(1), macd, sr, depth: { imbalance: 'N/A', spread: 'N/A', spreadPct: 'N/A', bestBid: 'N/A', bestAsk: 'N/A', bidWalls: [], askWalls: [] }, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding: { rate: 'N/A', sentiment: 'N/A' }, lsRatio: { long: 'N/A', sentiment: 'N/A' }, oi: 'N/A', vs: '1.0', reasons: [(lv >= 2 ? lv : sv) + '/3 timeframes aligned'], warnings: [], st, ema, tf5m, tf15m, tf1h, tf4h: { label:'4H',bias:'N/A',emoji:'⚪',rsi:'--',macd:'--',st:'--'}, stats: null, rsi4h: 'N/A', rsi15m: 'N/A', trailingSL: 'N/A', longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
 }
 
-// ============ FORMATTING ============
+// FORMATTING
 function fullSignal(s) {
   const emoji = s.direction === 'LONG' ? '🟢' : '🔴', stars = s.score >= 65 ? '★★★' : s.score >= 45 ? '★★' : '★';
   const label = s.type === 'stock' ? '📈 STOCK' : '₿ CRYPTO';
@@ -195,7 +181,7 @@ const SM = { reply_markup: { keyboard: [['📈 AAPL', '📈 TSLA', '📈 NVDA'],
 const COINS = { btc: 'BTCUSDT', eth: 'ETHUSDT', sol: 'SOLUSDT', doge: 'DOGEUSDT', xrp: 'XRPUSDT', ada: 'ADAUSDT', pepe: 'PEPEUSDT', shib: 'SHIBUSDT', bonk: 'BONKUSDT', wif: 'WIFUSDT', aave: 'AAVEUSDT', ltc: 'LTCUSDT', sui: 'SUIUSDT', sei: 'SEIUSDT', inj: 'INJUSDT', tia: 'TIAUSDT', rune: 'RUNEUSDT' };
 
 bot.onText(/\/start/, msg => { const uid = msg.from?.id; if (!isAuth(uid)) return bot.sendMessage(msg.chat.id, '⛔ Unauthorized'); bot.sendMessage(msg.chat.id, '🤖 *K9 SignalBot*\n\n🎯 Consensus Engine — 3/4 TF agreement\n⏱ 5M•15M•1H•4H with voting\n📊 Full indicators with alignment ✅/⚠️\n📡 Free: @k9signalalerts\n\n👇 Menu:', { parse_mode: 'Markdown', ...CM }); });
-bot.onText(/\/signal(?:\s+(.+))?/, async (msg, match) => { const uid = msg.from?.id; if (!isAuth(uid)) return; const input = match?.[1]; if (!input) return bot.sendMessage(msg.chat.id, '/signal btc | eth | sol | aapl | tsla | doge', { parse_mode: 'Markdown' }); let sym = input.toUpperCase(); if (TOP_STOCKS.includes(sym)) { const s = await genStockSignal(sym); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (!sym.endsWith('USDT')) sym = COINS[input.toLowerCase()] || sym + 'USDT'; const s = await genCryptoSignal(sym); if (!s) return bot.sendMessage(msg.chat.id, '⚪ *No Clear Signal*\n\nTimeframes are divided. No 3/4 consensus reached.\n\nWait for stronger agreement between 5M/15M/1H/4H.', { parse_mode: 'Markdown' }); bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); });
+bot.onText(/\/signal(?:\s+(.+))?/, async (msg, match) => { const uid = msg.from?.id; if (!isAuth(uid)) return; const input = match?.[1]; if (!input) return bot.sendMessage(msg.chat.id, '/signal btc | eth | sol | aapl | tsla | doge', { parse_mode: 'Markdown' }); let sym = input.toUpperCase(); if (TOP_STOCKS.includes(sym)) { const s = await genStockSignal(sym); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (!sym.endsWith('USDT')) sym = COINS[input.toLowerCase()] || sym + 'USDT'; const s = await genCryptoSignal(sym); if (!s) return bot.sendMessage(msg.chat.id, '⚪ *No Clear Signal*\n\nTimeframes divided — no 3/4 consensus.', { parse_mode: 'Markdown' }); bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); });
 bot.onText(/\/adduser (\d+)/, (msg, match) => { const uid = msg.from?.id; if (!ADMIN_IDS.includes(uid)) return; const nid = parseInt(match[1]); const cur = process.env.ALLOWED_IDS || ''; const up = cur ? cur + ',' + nid : String(nid); let env = fs.readFileSync('.env', 'utf8'); env = env.includes('ALLOWED_IDS=') ? env.replace(/ALLOWED_IDS=.*/, 'ALLOWED_IDS=' + up) : env + '\nALLOWED_IDS=' + up; fs.writeFileSync('.env', env); ALLOWED_IDS.push(nid); bot.sendMessage(msg.chat.id, '✅ User ' + nid + ' added!'); });
 
 bot.on('message', async msg => { const uid = msg.from?.id; if (!isAuth(uid)) return; const t = msg.text || '', cid = msg.chat.id; if (t.startsWith('/')) return;
@@ -223,4 +209,4 @@ app.get('/api/globalstats', (req, res) => res.json(GS));
 
 async function updatePrices() { for (const s of PRIORITY_PAIRS) { const p = await getPrice(s); if (p) { if (!GS.marketData) GS.marketData = {}; GS.marketData[s] = { price: p }; } } io.emit('priceUpdate', GS.marketData || {}); }
 
-server.listen(PORT, "0.0.0.0", () => { console.log('╔══════════════════════════════════╗'); console.log('║  K9 SIGNALBOT — COMPLETE v6     ║'); console.log('║  🎯 3/4 TF Consensus Engine     ║'); console.log('║  ✅/⚠️ Alignment Indicators     ║'); console.log('║  📊 Full Output — No Stripping  ║'); console.log('╚══════════════════════════════════╝'); broadcast(); setInterval(broadcast, 15 * 60 * 1000); setInterval(updatePrices, 5000); updatePrices(); });
+server.listen(PORT, '0.0.0.0', () => { console.log('K9 SignalBot running on port ' + PORT); broadcast(); setInterval(broadcast, 15 * 60 * 1000); setInterval(updatePrices, 5000); updatePrices(); });
