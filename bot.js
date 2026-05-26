@@ -48,7 +48,7 @@ async function getOpenInterest(s) { try { const r = await axios.get('https://fap
 
 // ============ YAHOO STOCKS ============
 async function getStockPrice(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); return r.data.chart.result[0].meta.regularMarketPrice; } catch (e) { return null; } }
-async function async function getStockData(s) { 
+async function getStockData(s) { 
   try { 
     const r = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + s, { 
       params: { interval: "5m", range: "1d" }, 
