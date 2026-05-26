@@ -24,15 +24,15 @@ if (!fs.existsSync('./state')) fs.mkdirSync('./state');
 if (!fs.existsSync('./stats')) fs.mkdirSync('./stats');
 
 // ============ INIT ============
-const botOptions = WEBHOOK_URL ? { webHook: { port: PORT } } : { polling: true };
+const botOptions = { polling: true };
 const bot = new TelegramBot(token, botOptions);
-if (WEBHOOK_URL) { bot.setWebHook(WEBHOOK_URL + '/bot' + token); console.log('Webhook mode'); } else { console.log('Polling mode'); }
+console.log("Polling mode");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors()); app.use(express.json());
-if (WEBHOOK_URL) { app.post('/bot' + token, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); }); }
+
 
 // ============ AUTH ============
 function isAuth(uid) { if (ADMIN_IDS.length === 0 && ALLOWED_IDS.length === 0) return 'admin'; if (ADMIN_IDS.includes(uid)) return 'admin'; if (ALLOWED_IDS.includes(uid)) return 'user'; return null; }
