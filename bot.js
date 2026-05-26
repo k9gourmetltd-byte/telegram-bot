@@ -8,21 +8,57 @@ const axios = require('axios');
 const fs = require('fs');
 const crypto = require('crypto');
 
+// ============ CONFIGURATION ============
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('Missing TELEGRAM_BOT_TOKEN');
 const PORT = process.env.PORT || 3000;
 const BTC_WALLET = 'bc1q772uueqj2zev3vrc4hmvm8stnc3zksed0p4hmk';
+const TWELVE_DATA_KEY = process.env.TWELVE_DATA_API_KEY || 'demo';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number).filter(Boolean);
 const ALLOWED_IDS = (process.env.ALLOWED_IDS || '').split(',').map(Number).filter(Boolean);
 const SIGNAL_CHANNEL = process.env.SIGNAL_CHANNEL || 'none';
 const PRIORITY_PAIRS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
 const TOP_STOCKS = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'SPY', 'QQQ', 'AMD'];
-const METALS = ['XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD', 'XCUUSD'];
-const METAL_NAMES = { XAUUSD: 'GOLD', XAGUSD: 'SILVER', XPTUSD: 'PLATINUM', XPDUSD: 'PALLADIUM', XCUUSD: 'COPPER' };
+const METALS = [
+  { symbol: 'XAUUSD', name: 'GOLD', yahoo: 'GC=F', volatility: 0.008 },
+  { symbol: 'XAGUSD', name: 'SILVER', yahoo: 'SI=F', volatility: 0.015 },
+  { symbol: 'XPTUSD', name: 'PLATINUM', yahoo: 'PL=F', volatility: 0.012 },
+  { symbol: 'XPDUSD', name: 'PALLADIUM', yahoo: 'PA=F', volatility: 0.015 },
+  { symbol: 'XCUUSD', name: 'COPPER', yahoo: 'HG=F', volatility: 0.012 }
+];
 const METAL_ALIASES = { gold: 'XAUUSD', silver: 'XAGUSD', platinum: 'XPTUSD', palladium: 'XPDUSD', copper: 'XCUUSD' };
 if (!fs.existsSync('./state')) fs.mkdirSync('./state');
 if (!fs.existsSync('./stats')) fs.mkdirSync('./stats');
 
+// ============ RATE LIMITERS ============
+const rateLimiters = {
+  binance: { tokens: 1200, lastRefill: Date.now(), maxTokens: 1200, refillRate: 20 },
+  twelvedata: { tokens: 8, lastRefill: Date.now(), maxTokens: 8, refillRate: 8/60 },
+  yahoo: { tokens: 30, lastRefill: Date.now(), maxTokens: 30, refillRate: 0.5 }
+};
+function checkRateLimit(service) {
+  const limiter = rateLimiters[service];
+  if (!limiter) return true;
+  const now = Date.now();
+  const elapsed = (now - limiter.lastRefill) / 1000;
+  limiter.tokens = Math.min(limiter.maxTokens, limiter.tokens + elapsed * limiter.refillRate);
+  limiter.lastRefill = now;
+  if (limiter.tokens >= 1) { limiter.tokens--; return true; }
+  return false;
+}
+
+// ============ MARKET HOURS GUARD ============
+function isMarketOpen(type) {
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  const utcDay = now.getUTCDay();
+  if (utcDay === 0 || utcDay === 6) return type === 'crypto';
+  if (type === 'metal') return utcHour >= 8 && utcHour <= 22;
+  if (type === 'stock') return utcHour >= 13 && utcHour <= 20;
+  return true;
+}
+
+// ============ INIT ============
 const bot = new TelegramBot(token, { polling: true });
 const app = express();
 const server = http.createServer(app);
@@ -39,7 +75,16 @@ function saveGS(d) { fs.writeFileSync(gsf(), JSON.stringify(d, null, 2)); }
 let GS = loadGS();
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-async function fetchWithRetry(url, opts, retries) { retries = retries || 3; for (let i = 0; i < retries; i++) { try { return await axios.get(url, { ...opts, timeout: (opts?.timeout || 5000) * (i + 1) }); } catch (e) { if (i === retries - 1) throw e; await new Promise(r => setTimeout(r, 1000 * (i + 1))); } } }
+// ============ CENTRALIZED FETCH WITH RETRY ============
+async function fetchWithRetry(url, opts, retries) {
+  retries = retries || 3;
+  const service = url.includes('binance') ? 'binance' : url.includes('twelvedata') ? 'twelvedata' : 'yahoo';
+  for (let i = 0; i < retries; i++) {
+    if (!checkRateLimit(service)) { await new Promise(r => setTimeout(r, 2000)); continue; }
+    try { return await axios.get(url, { ...opts, timeout: (opts?.timeout || 5000) * (i + 1) }); }
+    catch (e) { if (i === retries - 1) throw e; await new Promise(r => setTimeout(r, 1000 * (i + 1))); }
+  }
+}
 
 // ============ BINANCE API (CRYPTO) ============
 async function getPrice(s) { try { const r = await fetchWithRetry('https://api.binance.com/api/v3/ticker/price?symbol=' + s); return parseFloat(r.data.price); } catch (e) { return null; } }
@@ -51,17 +96,23 @@ async function getFunding(s) { try { const r = await fetchWithRetry('https://fap
 async function getLSRatio(s) { try { const r = await fetchWithRetry('https://fapi.binance.com/fapi/v1/globalLongShortAccountRatio?symbol=' + s + '&period=5m&limit=1'); const ratio = parseFloat(r.data[0]?.longShortRatio || 1); return { long: ratio.toFixed(1), sentiment: ratio > 1.5 ? 'BEARISH (crowded longs)' : ratio < 0.7 ? 'BULLISH (crowded shorts)' : 'NEUTRAL' }; } catch (e) { return { long: '1.0', sentiment: 'NEUTRAL' }; } }
 async function getOpenInterest(s) { try { const r = await fetchWithRetry('https://fapi.binance.com/fapi/v1/openInterest?symbol=' + s); return (parseFloat(r.data.openInterest) / 1e9).toFixed(1) + 'B'; } catch (e) { return 'N/A'; } }
 
-// ============ METALS API (Twelve Data) ============
-async function getMetalPrice(s) { try { const r = await fetchWithRetry('https://api.twelvedata.com/price?symbol=' + s + '&apikey=demo', {}, 2); const price = parseFloat(r.data.price); if (price) return price; } catch(e) {} try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + s + '=X?interval=5m&range=1d', { headers: { 'User-Agent': UA } }, 2); return r.data.chart.result[0].meta.regularMarketPrice; } catch(e) { return null; } }
-async function getMetalData(s) { try { const r = await fetchWithRetry('https://api.twelvedata.com/time_series?symbol=' + s + '&interval=5min&outputsize=50&apikey=demo', {}, 2); const values = r.data.values; if (values && values.length > 10) { return { closes: values.map(v => parseFloat(v.close)).reverse(), highs: values.map(v => parseFloat(v.high)).reverse(), lows: values.map(v => parseFloat(v.low)).reverse() }; } } catch(e) {} try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + s + '=X?interval=5m&range=1d', { headers: { 'User-Agent': UA } }, 2); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: (q.close || []).filter(c => c !== null), highs: (q.high || []).filter(h => h !== null), lows: (q.low || []).filter(l => l !== null) }; } catch(e) { return { closes: [], highs: [], lows: [] }; } }
-
-// ============ STOCKS (Twelve Data → Yahoo) ============
-async function getStockPrice(s) { try { const r = await fetchWithRetry('https://api.twelvedata.com/price?symbol=' + s + '&apikey=demo', {}, 2); const price = parseFloat(r.data.price); if (price) return price; } catch(e) {} try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + s + '?interval=5m&range=1d', { headers: { 'User-Agent': UA } }, 2); return r.data.chart.result[0].meta.regularMarketPrice; } catch(e) { return null; } }
-async function getStockData(s) { try { const r = await fetchWithRetry('https://api.twelvedata.com/time_series?symbol=' + s + '&interval=5min&outputsize=50&apikey=demo', {}, 2); const values = r.data.values; if (values && values.length > 10) { return { closes: values.map(v => parseFloat(v.close)).reverse(), highs: values.map(v => parseFloat(v.high)).reverse(), lows: values.map(v => parseFloat(v.low)).reverse() }; } } catch(e) {} try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + s + '?interval=5m&range=1d', { headers: { 'User-Agent': UA } }, 2); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: (q.close || []).filter(c => c !== null), highs: (q.high || []).filter(h => h !== null), lows: (q.low || []).filter(l => l !== null) }; } catch(e) { return { closes: [], highs: [], lows: [] }; } }
+// ============ TWELVE DATA → YAHOO (STOCKS & METALS) ============
+async function getAssetPrice(symbol, yahooSymbol) {
+  if (!checkRateLimit('twelvedata') && !checkRateLimit('yahoo')) return null;
+  try { const r = await fetchWithRetry('https://api.twelvedata.com/price?symbol=' + symbol + '&apikey=' + TWELVE_DATA_KEY, {}, 2); const price = parseFloat(r.data.price); if (price) return price; } catch(e) {}
+  try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + (yahooSymbol || symbol), { headers: { 'User-Agent': UA } }, 2); return r.data.chart.result[0].meta.regularMarketPrice; } catch(e) { return null; }
+}
+async function getAssetData(symbol, yahooSymbol) {
+  try { const r = await fetchWithRetry('https://api.twelvedata.com/time_series?symbol=' + symbol + '&interval=5min&outputsize=50&apikey=' + TWELVE_DATA_KEY, {}, 2); const values = r.data.values; if (values && values.length > 10) { return { closes: values.map(v => parseFloat(v.close)).reverse(), highs: values.map(v => parseFloat(v.high)).reverse(), lows: values.map(v => parseFloat(v.low)).reverse() }; } } catch(e) {}
+  try { const r = await fetchWithRetry('https://query1.finance.yahoo.com/v8/finance/chart/' + (yahooSymbol || symbol), { headers: { 'User-Agent': UA } }, 2); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: (q.close || []).filter(c => c !== null), highs: (q.high || []).filter(h => h !== null), lows: (q.low || []).filter(l => l !== null) }; } catch(e) { return { closes: [], highs: [], lows: [] }; } }
+async function getStockPrice(s) { return getAssetPrice(s, s); }
+async function getStockData(s) { return getAssetData(s, s); }
+async function getMetalPrice(s) { const m = METALS.find(x => x.symbol === s); return getAssetPrice(s, m ? m.yahoo : s); }
+async function getMetalData(s) { const m = METALS.find(x => x.symbol === s); return getAssetData(s, m ? m.yahoo : s); }
 
 // ============ FOREX & POLYMARKET ============
 async function fetchForex() { try { const r = await fetchWithRetry('https://nfs.faireconomy.media/ff_calendar_thisweek.json', {}, 2); const events = []; const today = new Date(); if (Array.isArray(r.data)) { r.data.forEach(e => { const d = new Date(e.date || ''); if (Math.abs(d - today) < 86400000) events.push({ title: e.title || 'Event', country: e.country || 'USD', time: e.time || '', impact: e.impact || 'Medium', forecast: e.forecast || '', previous: e.previous || '' }); }); } return events; } catch (e) { return []; } }
-async function getPolymarket() { try { const r = await fetchWithRetry('https://gamma-api.polymarket.com/markets?limit=6&order=volume&ascending=false', {}, 2); if (Array.isArray(r.data)) return r.data.slice(0, 6).map(m => ({ title: m.title || m.question || '', volume: (parseFloat(m.volumeNum || m.volume || 0) / 1e6).toFixed(1) + 'M', prices: [m.outcomePrices ? JSON.parse(m.outcomePrices)[0] : '0'].map(p => (parseFloat(p) * 100).toFixed(0) + '%') })); } catch (e) { return null; } }
+async function getPolymarket() { try { const r = await fetchWithRetry('https://gamma-api.polymarket.com/markets?limit=6&order=volume&ascending=false', {}, 2); if (Array.isArray(r.data)) return r.data.slice(0, 6).map(m => ({ title: m.title || '', volume: (parseFloat(m.volumeNum || 0) / 1e6).toFixed(1) + 'M', prices: [m.outcomePrices ? JSON.parse(m.outcomePrices)[0] : '0'].map(p => (parseFloat(p) * 100).toFixed(0) + '%') })); } catch (e) { return null; } }
 
 // ============ TECHNICAL INDICATORS ============
 function calcRSI(p, per) { per = per || 14; if (p.length < per + 1) return 50; let g = 0, l = 0; for (let i = p.length - per; i < p.length; i++) { let d = p[i] - p[i - 1]; if (d >= 0) g += d; else l -= d; } if (l === 0) return 100; return 100 - (100 / (1 + (g / per) / (l / per))); }
@@ -73,116 +124,87 @@ function calcEMAVal(cl, per) { if (cl.length < per) return cl[cl.length - 1]; co
 function calcEMACross(cl) { const e9 = calcEMAVal(cl, 9); const e21 = calcEMAVal(cl, 21); const e50 = calcEMAVal(cl, 50); const e200 = calcEMAVal(cl, 200); const p9 = calcEMAVal(cl.slice(0, -1), 9); const p21 = calcEMAVal(cl.slice(0, -1), 21); return { ema9: e9.toFixed(2), ema21: e21.toFixed(2), ema50: e50.toFixed(2), ema200: e200.toFixed(2), signal: (p9 <= p21 && e9 > e21) ? 'STRONG BUY' : (p9 >= p21 && e9 < e21) ? 'STRONG SELL' : e9 > e21 ? 'BUY' : 'SELL', slowCross: e50 > e200 ? 'BULLISH' : 'BEARISH' }; }
 function tfVote(tf) { if (!tf || tf.bias === '--' || tf.bias === 'N/A') return 'neutral'; if (tf.bias.includes('BULLISH')) return 'long'; if (tf.bias.includes('BEARISH')) return 'short'; return 'neutral'; }
 
-function estimateTPTime(s) {
-  const vol = parseFloat(s.vs) || 1;
+// ============ TP TIME ESTIMATOR (ATR-based) ============
+function estimateTPTime(s, assetType) {
+  const vol = assetType === 'metal' ? (METALS.find(m => m.symbol === s.symbol)?.volatility || 0.012) : assetType === 'stock' ? 0.015 : s.symbol?.includes('BTC') ? 0.008 : 0.020;
   const tp1Dist = Math.abs((parseFloat(s.tp1) / parseFloat(s.entry) - 1) * 100);
-  const tp2Dist = Math.abs((parseFloat(s.tp2) / parseFloat(s.entry) - 1) * 100);
-  const tp3Dist = Math.abs((parseFloat(s.tp3) / parseFloat(s.entry) - 1) * 100);
-  const baseMin = s.symbol && (s.symbol.includes('BTC') || s.symbol.includes('XAU')) ? 20 : s.symbol && (s.symbol.includes('ETH') || s.symbol.includes('XAG')) ? 15 : 10;
-  const tp1min = Math.round(baseMin * tp1Dist / (0.8 * Math.max(0.5, vol)));
-  const tp2min = Math.round(baseMin * 2.5 * tp2Dist / (0.8 * Math.max(0.5, vol)));
-  const tp3min = Math.round(baseMin * 5 * tp3Dist / (0.8 * Math.max(0.5, vol)));
+  const baseMin = assetType === 'metal' ? 18 : assetType === 'stock' ? 15 : s.symbol?.includes('BTC') ? 20 : 12;
+  const tp1min = Math.round(baseMin * tp1Dist / vol);
+  const tp2min = Math.round(baseMin * 2.5 * (Math.abs((parseFloat(s.tp2) / parseFloat(s.entry) - 1) * 100)) / vol);
+  const tp3min = Math.round(baseMin * 5 * (Math.abs((parseFloat(s.tp3) / parseFloat(s.entry) - 1) * 100)) / vol);
   const fmt = m => m < 60 ? m + 'm' : Math.round(m/60) + 'h' + (m%60>0 ? ' ' + (m%60) + 'm' : '');
   return { tp1: fmt(tp1min), tp2: fmt(tp2min), tp3: fmt(tp3min) };
 }
 
-// ============ CRYPTO SIGNAL ============
-async function genCryptoSignal(symbol) {
-  const [price, stats, k5m, k15m, k1h, k4h, depth, funding, lsRatio, oi] = await Promise.all([getPrice(symbol), get24hr(symbol), getKlines(symbol, '5m', 50), getKlines(symbol, '15m', 30), getKlines(symbol, '1h', 50), getKlines(symbol, '4h', 50), getDepth(symbol), getFunding(symbol), getLSRatio(symbol), getOpenInterest(symbol)]);
-  if (!price || !depth) return null;
-  const tf5m = { label: '5M', bias: calcRSI(k5m.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k5m.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k5m.map(k => k.close)) > 55 ? '🟢' : calcRSI(k5m.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k5m.map(k => k.close)).toFixed(1), macd: calcMACD(k5m.map(k => k.close)).trend, st: calcSupertrend(k5m.map(k => k.high), k5m.map(k => k.low), k5m.map(k => k.close)).signal };
-  const tf15m = { label: '15M', bias: calcRSI(k15m.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k15m.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k15m.map(k => k.close)) > 55 ? '🟢' : calcRSI(k15m.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k15m.map(k => k.close)).toFixed(1), macd: calcMACD(k15m.map(k => k.close)).trend, st: calcSupertrend(k15m.map(k => k.high), k15m.map(k => k.low), k15m.map(k => k.close)).signal };
-  const tf1h = { label: '1H', bias: calcRSI(k1h.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k1h.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k1h.map(k => k.close)) > 55 ? '🟢' : calcRSI(k1h.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k1h.map(k => k.close)).toFixed(1), macd: calcMACD(k1h.map(k => k.close)).trend, st: calcSupertrend(k1h.map(k => k.high), k1h.map(k => k.low), k1h.map(k => k.close)).signal };
-  const tf4h = { label: '4H', bias: calcRSI(k4h.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k4h.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k4h.map(k => k.close)) > 55 ? '🟢' : calcRSI(k4h.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k4h.map(k => k.close)).toFixed(1), macd: calcMACD(k4h.map(k => k.close)).trend, st: calcSupertrend(k4h.map(k => k.high), k4h.map(k => k.low), k4h.map(k => k.close)).signal };
-  const votes = [tfVote(tf5m), tfVote(tf15m), tfVote(tf1h), tfVote(tf4h)];
+// ============ UNIFIED SIGNAL GENERATOR ============
+async function genSignal(symbol, type, meta) {
+  if (!isMarketOpen(type)) return null;
+  let price, closes, highs, lows, depth, funding, lsRatio, oi, stats;
+  
+  if (type === 'crypto') {
+    [price, stats, k5m, k15m, k1h, k4h, depth, funding, lsRatio, oi] = await Promise.all([getPrice(symbol), get24hr(symbol), getKlines(symbol, '5m', 50), getKlines(symbol, '15m', 30), getKlines(symbol, '1h', 50), getKlines(symbol, '4h', 50), getDepth(symbol), getFunding(symbol), getLSRatio(symbol), getOpenInterest(symbol)]);
+    if (!price || !depth) return null;
+    closes = k1h.map(k => k.close); highs = k1h.map(k => k.high); lows = k1h.map(k => k.low);
+    var tf5m = { label: '5M', bias: calcRSI(k5m.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k5m.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k5m.map(k => k.close)) > 55 ? '🟢' : calcRSI(k5m.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k5m.map(k => k.close)).toFixed(1), macd: calcMACD(k5m.map(k => k.close)).trend, st: calcSupertrend(k5m.map(k => k.high), k5m.map(k => k.low), k5m.map(k => k.close)).signal };
+    var tf15m = { label: '15M', bias: calcRSI(k15m.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k15m.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k15m.map(k => k.close)) > 55 ? '🟢' : calcRSI(k15m.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k15m.map(k => k.close)).toFixed(1), macd: calcMACD(k15m.map(k => k.close)).trend, st: calcSupertrend(k15m.map(k => k.high), k15m.map(k => k.low), k15m.map(k => k.close)).signal };
+    var tf1h = { label: '1H', bias: calcRSI(k1h.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k1h.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k1h.map(k => k.close)) > 55 ? '🟢' : calcRSI(k1h.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k1h.map(k => k.close)).toFixed(1), macd: calcMACD(k1h.map(k => k.close)).trend, st: calcSupertrend(k1h.map(k => k.high), k1h.map(k => k.low), k1h.map(k => k.close)).signal };
+    var tf4h = { label: '4H', bias: calcRSI(k4h.map(k => k.close)) > 55 ? 'BULLISH' : calcRSI(k4h.map(k => k.close)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(k4h.map(k => k.close)) > 55 ? '🟢' : calcRSI(k4h.map(k => k.close)) < 45 ? '🔴' : '⚪', rsi: calcRSI(k4h.map(k => k.close)).toFixed(1), macd: calcMACD(k4h.map(k => k.close)).trend, st: calcSupertrend(k4h.map(k => k.high), k4h.map(k => k.low), k4h.map(k => k.close)).signal };
+  } else {
+    const fetchPrice = type === 'metal' ? getMetalPrice : getStockPrice;
+    const fetchData = type === 'metal' ? getMetalData : getStockData;
+    [price, data] = await Promise.all([fetchPrice(symbol), fetchData(symbol)]);
+    if (!price || !data || !data.closes || data.closes.length < 15) return null;
+    closes = data.closes; highs = data.highs; lows = data.lows;
+    depth = { imbalance: 'N/A', spread: 'N/A', spreadPct: 'N/A', bestBid: 'N/A', bestAsk: 'N/A', bidWalls: [], askWalls: [] };
+    funding = { rate: 'N/A', sentiment: 'N/A' }; lsRatio = { long: 'N/A', sentiment: 'N/A' }; oi = 'N/A'; stats = null;
+    var tf5m = { label: '5M', bias: calcRSI(closes.slice(-50)) > 55 ? 'BULLISH' : calcRSI(closes.slice(-50)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(closes.slice(-50)) > 55 ? '🟢' : calcRSI(closes.slice(-50)) < 45 ? '🔴' : '⚪', rsi: calcRSI(closes.slice(-50)).toFixed(1), macd: calcMACD(closes.slice(-50)).trend, st: calcSupertrend(highs.slice(-50), lows.slice(-50), closes.slice(-50)).signal };
+    var tf15m = { label: '15M', bias: calcRSI(closes.slice(-30)) > 55 ? 'BULLISH' : calcRSI(closes.slice(-30)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(closes.slice(-30)) > 55 ? '🟢' : calcRSI(closes.slice(-30)) < 45 ? '🔴' : '⚪', rsi: calcRSI(closes.slice(-30)).toFixed(1), macd: calcMACD(closes.slice(-30)).trend, st: calcSupertrend(highs.slice(-30), lows.slice(-30), closes.slice(-30)).signal };
+    var tf1h = { label: '1H', bias: calcRSI(closes) > 55 ? 'BULLISH' : calcRSI(closes) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(closes) > 55 ? '🟢' : calcRSI(closes) < 45 ? '🔴' : '⚪', rsi: calcRSI(closes).toFixed(1), macd: calcMACD(closes).trend, st: calcSupertrend(highs, lows, closes).signal };
+    var tf4h = { label: '4H', bias: 'N/A', emoji: '⚪', rsi: '--', macd: '--', st: '--' };
+  }
+
+  const tfs = [tf5m, tf15m, tf1h, tf4h].filter(t => t.bias !== 'N/A');
+  const votes = tfs.map(tfVote);
   const lv = votes.filter(v => v === 'long').length, sv = votes.filter(v => v === 'short').length;
+  const minVotes = type === 'crypto' ? 3 : 2;
   let dir = null;
-  if (lv >= 3) dir = 'LONG'; else if (sv >= 3) dir = 'SHORT';
-  else if (lv === 2 && sv <= 1 && depth.imbalance > 10) dir = 'LONG';
-  else if (sv === 2 && lv <= 1 && depth.imbalance < -10) dir = 'SHORT';
+  if (lv >= minVotes) dir = 'LONG'; else if (sv >= minVotes) dir = 'SHORT';
+  if (!dir && type === 'crypto') {
+    if (lv === 2 && sv <= 1 && depth.imbalance > 10) dir = 'LONG';
+    else if (sv === 2 && lv <= 1 && depth.imbalance < -10) dir = 'SHORT';
+  }
   if (!dir) return null;
-  const c1h = k1h.map(k => k.close);
-  const rsi1h = calcRSI(c1h), rsi4h = calcRSI(k4h.map(k => k.close)), rsi15m = calcRSI(k15m.map(k => k.close));
-  const macd1h = calcMACD(c1h), sr = calcSR(c1h);
-  const st = calcSupertrend(k1h.map(k => k.high), k1h.map(k => k.low), c1h);
-  const ema = calcEMACross(c1h);
-  const rv = k15m.slice(-5).reduce((s, k) => s + k.volume, 0) / 5;
-  const av = k15m.slice(0, 25).reduce((s, k) => s + k.volume, 0) / 25;
-  const vs = av > 0 ? rv / av : 1;
+
+  const rsi1h = calcRSI(closes), macd1h = calcMACD(closes), sr = calcSR(closes);
+  const st = calcSupertrend(highs, lows, closes);
+  const ema = calcEMACross(closes);
+  const vs = type === 'crypto' ? 1.5 : 1.0;
   let warnings = [], reasons = [];
   if (funding.sentiment === 'BEARISH' && dir === 'LONG') warnings.push('Funding opposes');
   if (funding.sentiment === 'BULLISH' && dir === 'SHORT') warnings.push('Funding opposes');
   if (macd1h.trend === 'BEARISH' && dir === 'LONG') warnings.push('MACD opposes');
   if (macd1h.trend === 'BULLISH' && dir === 'SHORT') warnings.push('MACD opposes');
-  if (ema.slowCross !== (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) warnings.push('Cross opposes');
   if (st.trend !== (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) warnings.push('Supertrend opposes');
-  if (lv >= 3) reasons.push(lv + '/4 TFs bullish');
-  if (sv >= 3) reasons.push(sv + '/4 TFs bearish');
-  if (depth.imbalance > 10 && dir === 'LONG') reasons.push('Order book confirms (' + depth.imbalance + '%)');
-  if (depth.imbalance < -10 && dir === 'SHORT') reasons.push('Order book confirms (' + Math.abs(depth.imbalance) + '%)');
+  if (lv >= minVotes) reasons.push(lv + '/' + tfs.length + ' TFs bullish');
+  if (sv >= minVotes) reasons.push(sv + '/' + tfs.length + ' TFs bearish');
+  if (type === 'crypto' && depth.imbalance > 10 && dir === 'LONG') reasons.push('Order book confirms (' + depth.imbalance + '%)');
+  if (type === 'crypto' && depth.imbalance < -10 && dir === 'SHORT') reasons.push('Order book confirms (' + Math.abs(depth.imbalance) + '%)');
   if (st.trend === (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) reasons.push('Supertrend aligned');
   if (ema.signal.includes(dir === 'LONG' ? 'BUY' : 'SELL')) reasons.push('EMA aligned');
-  if (vs > 2) reasons.push('Volume surge ' + vs.toFixed(1) + 'x');
-  let sc = lv >= 3 ? 55 + lv * 10 : sv >= 3 ? 55 + sv * 10 : 45;
-  if (depth.imbalance > 15 && dir === 'LONG') sc += 10;
-  if (depth.imbalance < -15 && dir === 'SHORT') sc += 10;
+  let sc = lv >= minVotes ? 50 + lv * 12 : 50 + sv * 12;
+  if (type === 'crypto' && depth.imbalance > 15 && dir === 'LONG') sc += 10;
+  if (type === 'crypto' && depth.imbalance < -15 && dir === 'SHORT') sc += 10;
   if (st.trend === (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) sc += 10;
-  if (ema.signal.includes(dir === 'LONG' ? 'BUY' : 'SELL')) sc += 5;
   sc -= warnings.length * 5;
   sc = Math.min(95, Math.max(25, sc));
-  const vol = symbol.includes('BTC') ? 0.008 : 0.020;
+  
+  const vol = type === 'metal' ? (meta?.volatility || 0.012) : type === 'stock' ? 0.015 : symbol.includes('BTC') ? 0.008 : 0.020;
   let e, tp1, tp2, tp3, sl;
   if (dir === 'LONG') { e = price * 0.999; tp1 = +(e * (1 + vol)).toFixed(2); tp2 = +(e * (1 + vol * 2.0)).toFixed(2); tp3 = +(e * (1 + vol * 3.5)).toFixed(2); sl = +(e * (1 - vol * 0.8)).toFixed(2); }
   else { e = price * 1.001; tp1 = +(e * (1 - vol)).toFixed(2); tp2 = +(e * (1 - vol * 2.0)).toFixed(2); tp3 = +(e * (1 - vol * 3.5)).toFixed(2); sl = +(e * (1 + vol * 0.8)).toFixed(2); }
-  return { id: crypto.randomBytes(4).toString('hex'), type: 'crypto', symbol, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, trailingSL: (vol * 0.6 * 100).toFixed(1) + '%', score: sc, rsi1h: rsi1h.toFixed(1), rsi4h: rsi4h.toFixed(1), rsi15m: rsi15m.toFixed(1), macd: macd1h, sr, depth, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding, lsRatio, oi, vs: vs.toFixed(1), reasons, warnings, st, ema, tf5m, tf15m, tf1h, tf4h, stats, longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
-}
-
-// ============ METAL SIGNAL ============
-async function genMetalSignal(symbol) {
-  const [price, data] = await Promise.all([getMetalPrice(symbol), getMetalData(symbol)]);
-  if (!price || !data.closes || data.closes.length < 15) return null;
-  const cl = data.closes, hi = data.highs, lo = data.lows;
-  const tf5m = { label: '5M', bias: calcRSI(cl.slice(-50)) > 55 ? 'BULLISH' : calcRSI(cl.slice(-50)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl.slice(-50)) > 55 ? '🟢' : calcRSI(cl.slice(-50)) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl.slice(-50)).toFixed(1), macd: calcMACD(cl.slice(-50)).trend, st: calcSupertrend(hi.slice(-50), lo.slice(-50), cl.slice(-50)).signal };
-  const tf15m = { label: '15M', bias: calcRSI(cl.slice(-30)) > 55 ? 'BULLISH' : calcRSI(cl.slice(-30)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl.slice(-30)) > 55 ? '🟢' : calcRSI(cl.slice(-30)) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl.slice(-30)).toFixed(1), macd: calcMACD(cl.slice(-30)).trend, st: calcSupertrend(hi.slice(-30), lo.slice(-30), cl.slice(-30)).signal };
-  const tf1h = { label: '1H', bias: calcRSI(cl) > 55 ? 'BULLISH' : calcRSI(cl) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl) > 55 ? '🟢' : calcRSI(cl) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl).toFixed(1), macd: calcMACD(cl).trend, st: calcSupertrend(hi, lo, cl).signal };
-  const votes = [tfVote(tf5m), tfVote(tf15m), tfVote(tf1h)];
-  const lv = votes.filter(v => v === 'long').length, sv = votes.filter(v => v === 'short').length;
-  let dir = null;
-  if (lv >= 2) dir = 'LONG'; else if (sv >= 2) dir = 'SHORT';
-  if (!dir) return null;
-  const rsi = calcRSI(cl), macd = calcMACD(cl), sr = calcSR(cl), st = calcSupertrend(hi, lo, cl), ema = calcEMACross(cl);
-  let sc = lv >= 2 ? 50 + lv * 10 : 50 + sv * 10;
-  if (st.trend === (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) sc += 10;
-  sc = Math.min(90, Math.max(30, sc));
-  const vol = 0.012;
-  let e, tp1, tp2, tp3, sl;
-  if (dir === 'LONG') { e = price * 0.999; tp1 = +(e * (1 + vol)).toFixed(2); tp2 = +(e * (1 + vol * 2)).toFixed(2); tp3 = +(e * (1 + vol * 3.5)).toFixed(2); sl = +(e * (1 - vol * 0.8)).toFixed(2); }
-  else { e = price * 1.001; tp1 = +(e * (1 - vol)).toFixed(2); tp2 = +(e * (1 - vol * 2)).toFixed(2); tp3 = +(e * (1 - vol * 3.5)).toFixed(2); sl = +(e * (1 + vol * 0.8)).toFixed(2); }
-  return { id: crypto.randomBytes(4).toString('hex'), type: 'metal', symbol, name: METAL_NAMES[symbol] || symbol, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, score: sc, rsi1h: rsi.toFixed(1), macd, sr, depth: { imbalance: 'N/A', spread: 'N/A', spreadPct: 'N/A', bestBid: 'N/A', bestAsk: 'N/A', bidWalls: [], askWalls: [] }, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding: { rate: 'N/A', sentiment: 'N/A' }, lsRatio: { long: 'N/A', sentiment: 'N/A' }, oi: 'N/A', vs: '1.0', reasons: [(lv >= 2 ? lv : sv) + '/3 TFs aligned'], warnings: [], st, ema, tf5m, tf15m, tf1h, tf4h: { label:'4H',bias:'N/A',emoji:'⚪',rsi:'--',macd:'--',st:'--'}, stats: null, rsi4h: 'N/A', rsi15m: 'N/A', trailingSL: 'N/A', longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
-}
-
-// ============ STOCK SIGNAL ============
-async function genStockSignal(symbol) {
-  const [price, data] = await Promise.all([getStockPrice(symbol), getStockData(symbol)]);
-  if (!price || !data.closes || data.closes.length < 15) return null;
-  const cl = data.closes, hi = data.highs, lo = data.lows;
-  const tf5m = { label: '5M', bias: calcRSI(cl.slice(-50)) > 55 ? 'BULLISH' : calcRSI(cl.slice(-50)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl.slice(-50)) > 55 ? '🟢' : calcRSI(cl.slice(-50)) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl.slice(-50)).toFixed(1), macd: calcMACD(cl.slice(-50)).trend, st: calcSupertrend(hi.slice(-50), lo.slice(-50), cl.slice(-50)).signal };
-  const tf15m = { label: '15M', bias: calcRSI(cl.slice(-30)) > 55 ? 'BULLISH' : calcRSI(cl.slice(-30)) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl.slice(-30)) > 55 ? '🟢' : calcRSI(cl.slice(-30)) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl.slice(-30)).toFixed(1), macd: calcMACD(cl.slice(-30)).trend, st: calcSupertrend(hi.slice(-30), lo.slice(-30), cl.slice(-30)).signal };
-  const tf1h = { label: '1H', bias: calcRSI(cl) > 55 ? 'BULLISH' : calcRSI(cl) < 45 ? 'BEARISH' : 'NEUTRAL', emoji: calcRSI(cl) > 55 ? '🟢' : calcRSI(cl) < 45 ? '🔴' : '⚪', rsi: calcRSI(cl).toFixed(1), macd: calcMACD(cl).trend, st: calcSupertrend(hi, lo, cl).signal };
-  const votes = [tfVote(tf5m), tfVote(tf15m), tfVote(tf1h)];
-  const lv = votes.filter(v => v === 'long').length, sv = votes.filter(v => v === 'short').length;
-  let dir = null;
-  if (lv >= 2) dir = 'LONG'; else if (sv >= 2) dir = 'SHORT';
-  if (!dir) return null;
-  const rsi = calcRSI(cl), macd = calcMACD(cl), sr = calcSR(cl), st = calcSupertrend(hi, lo, cl), ema = calcEMACross(cl);
-  let sc = lv >= 2 ? 50 + lv * 10 : 50 + sv * 10;
-  if (st.trend === (dir === 'LONG' ? 'BULLISH' : 'BEARISH')) sc += 10;
-  sc = Math.min(90, Math.max(30, sc));
-  const vol = 0.015;
-  let e, tp1, tp2, tp3, sl;
-  if (dir === 'LONG') { e = price * 0.999; tp1 = +(e * (1 + vol)).toFixed(2); tp2 = +(e * (1 + vol * 2)).toFixed(2); tp3 = +(e * (1 + vol * 3.5)).toFixed(2); sl = +(e * (1 - vol * 0.8)).toFixed(2); }
-  else { e = price * 1.001; tp1 = +(e * (1 - vol)).toFixed(2); tp2 = +(e * (1 - vol * 2)).toFixed(2); tp3 = +(e * (1 - vol * 3.5)).toFixed(2); sl = +(e * (1 + vol * 0.8)).toFixed(2); }
-  return { id: crypto.randomBytes(4).toString('hex'), type: 'stock', symbol, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, score: sc, rsi1h: rsi.toFixed(1), macd, sr, depth: { imbalance: 'N/A', spread: 'N/A', spreadPct: 'N/A', bestBid: 'N/A', bestAsk: 'N/A', bidWalls: [], askWalls: [] }, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding: { rate: 'N/A', sentiment: 'N/A' }, lsRatio: { long: 'N/A', sentiment: 'N/A' }, oi: 'N/A', vs: '1.0', reasons: [(lv >= 2 ? lv : sv) + '/3 TFs aligned'], warnings: [], st, ema, tf5m, tf15m, tf1h, tf4h: { label:'4H',bias:'N/A',emoji:'⚪',rsi:'--',macd:'--',st:'--'}, stats: null, rsi4h: 'N/A', rsi15m: 'N/A', trailingSL: 'N/A', longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
+  
+  const name = type === 'metal' ? (meta?.name || symbol) : symbol;
+  return { id: crypto.randomBytes(4).toString('hex'), type, symbol, name, direction: dir, price: price.toFixed(2), entry: e.toFixed(2), tp1, tp2, tp3, sl, trailingSL: (vol * 0.6 * 100).toFixed(1) + '%', score: sc, rsi1h: rsi1h.toFixed(1), rsi4h: type === 'crypto' ? calcRSI(closes.slice(-50)).toFixed(1) : 'N/A', rsi15m: type === 'crypto' ? calcRSI(closes.slice(-30)).toFixed(1) : 'N/A', macd: macd1h, sr, depth, rr1: (Math.abs(tp1 - e) / Math.abs(e - sl)).toFixed(1), rr2: (Math.abs(tp2 - e) / Math.abs(e - sl)).toFixed(1), rr3: (Math.abs(tp3 - e) / Math.abs(e - sl)).toFixed(1), funding, lsRatio, oi, vs: vs.toFixed(1), reasons, warnings, st, ema, tf5m, tf15m, tf1h, tf4h, stats, longVotes: lv, shortVotes: sv, timestamp: new Date().toISOString() };
 }
 
 // ============ FULL SIGNAL FORMAT ============
@@ -191,7 +213,7 @@ function fullSignal(s) {
   const label = s.type === 'stock' ? '📈 STOCK' : s.type === 'metal' ? '🥇 METAL' : '₿ CRYPTO';
   const rsiEmoji = parseFloat(s.rsi1h) > 70 ? '🔥' : parseFloat(s.rsi1h) < 30 ? '❄️' : '➖';
   const db = s.depth && s.depth.imbalance !== 'N/A' ? (parseFloat(s.depth.imbalance) > 10 ? 'BULLISH' : parseFloat(s.depth.imbalance) < -10 ? 'BEARISH' : 'NEUTRAL') : 'N/A';
-  const et = estimateTPTime(s);
+  const et = estimateTPTime(s, s.type);
   let tfSection = '⏱ *TIMEFRAME CONSENSUS* (' + (s.longVotes || 0) + 'L/' + (s.shortVotes || 0) + 'S)\n';
   [s.tf5m, s.tf15m, s.tf1h, s.tf4h].forEach(tf => { if (tf && tf.bias && tf.bias !== '--' && tf.bias !== 'N/A') tfSection += tf.emoji + ' *' + tf.label + ':* ' + tf.bias + ' | RSI:' + tf.rsi + ' | MACD:' + tf.macd + ' | ST:' + tf.st + '\n'; });
   let wallText = '';
@@ -203,6 +225,7 @@ function fullSignal(s) {
   let crossAlign = s.ema.slowCross === (s.direction === 'LONG' ? 'BULLISH' : 'BEARISH') ? ' ✅' : ' ⚠️';
   let extra = '';
   if (s.type === 'crypto') extra = '\n— *MARKET DATA* —\n💰 *Funding:* ' + s.funding.rate + '% (' + s.funding.sentiment + ')\n👥 *L/S Ratio:* ' + s.lsRatio.long + ':1 — ' + s.lsRatio.sentiment + '\n📊 *OI:* ' + (s.oi === '0.0B' ? 'Fetching...' : s.oi) + ' | *Vol:* ' + s.vs + 'x avg\n' + (s.stats ? '📈 *24h:* ' + s.stats.change.toFixed(1) + '% | H:$' + s.stats.high.toFixed(2) + ' L:$' + s.stats.low.toFixed(2) : '');
+  if (s.type === 'metal') extra = '\n— *MARKET HOURS* —\n🕐 London/NY sessions | Spreads tightest 8AM-5PM ET';
   return label + ' • ' + emoji + ' *' + s.direction + ' ' + (s.name || s.symbol) + '*\n\n' +
     '💰 *Current:* $' + s.price + '  →  🎯 *Entry:* $' + s.entry + '\n\n' +
     '📈 *TP1:* $' + s.tp1 + ' _(+' + ((parseFloat(s.tp1) / parseFloat(s.entry) - 1) * 100).toFixed(1) + '%, R:R 1:' + s.rr1 + ')_ ⏱ ~' + et.tp1 + '\n' +
@@ -215,28 +238,28 @@ function fullSignal(s) {
     '📐 *S/R Levels:*\n  Support: $' + s.sr.support + ' | Resistance: $' + s.sr.resistance + '\n  Pivot: $' + s.sr.pivot + ' | R1: $' + s.sr.r1 + ' | S1: $' + s.sr.s1 + '\n  R2: $' + s.sr.r2 + ' | S2: $' + s.sr.s2 + '\n\n' +
     '— *ORDER BOOK* —\n📊 *Imbalance:* ' + (s.depth ? s.depth.imbalance + '% (' + db + ')' : 'N/A') + '\n📏 *Spread:* $' + (s.depth ? s.depth.spread + ' (' + s.depth.spreadPct + '%)' : 'N/A') + '\n  Bid: $' + (s.depth ? s.depth.bestBid : 'N/A') + ' | Ask: $' + (s.depth ? s.depth.bestAsk : 'N/A') + wallText + '\n\n' +
     '— *TRADINGVIEW* —\n📊 *Supertrend:* ' + s.st.signal + ' (' + s.st.trend + ') | Level: $' + s.st.value + stAlign + '\n📈 *EMA Crossover:* ' + s.ema.signal + emaAlign + '\n  EMA9:$' + s.ema.ema9 + ' | EMA21:$' + s.ema.ema21 + '\n  EMA50:$' + s.ema.ema50 + ' | EMA200:$' + s.ema.ema200 + '\n  ' + (s.ema.slowCross === 'BULLISH' ? '✅ Golden Cross' : '❌ Death Cross') + crossAlign + '\n' +
-    extra + warnText + '\n\n💡 *Signals:* ' + s.reasons.slice(0, 6).join(' • ') + '\n\n⚡ *K9 Conviction:* ' + stars + ' ' + s.score + '/95 | Consensus: ' + (s.longVotes || 0) + 'L/' + (s.shortVotes || 0) + 'S';
+    extra + warnText + '\n\n💡 *Signals:* ' + s.reasons.slice(0, 6).join(' • ') + '\n\n⚡ *K9 Conviction:* ' + stars + ' ' + s.score + '/95 | Consensus: ' + (s.longVotes || 0) + 'L/' + (s.shortVotes || 0) + 'S\n\n🔐 *K9 SignalBot • Verified Consensus Engine*\n📡 @k9signalalerts • 💎 @K9sigbot';
 }
 
-function freeSignal(s) { const e = s.direction === 'LONG' ? '🟢' : '🔴'; return e + ' *' + s.direction + ' ' + s.symbol + '*\n💰 $' + s.price + ' | ' + (s.longVotes || 0) + 'L/' + (s.shortVotes || 0) + 'S\n⚡ Premium: Full breakdown'; }
+function freeSignal(s) { const e = s.direction === 'LONG' ? '🟢' : '🔴'; return e + ' *' + s.direction + ' ' + (s.name || s.symbol) + '*\n💰 $' + s.price + ' | ' + (s.longVotes || 0) + 'L/' + (s.shortVotes || 0) + 'S\n⚡ Premium: Full breakdown'; }
 
-async function broadcast() { const sigs = []; for (const sym of PRIORITY_PAIRS) { try { const s = await genCryptoSignal(sym); if (s) sigs.push(s); } catch (e) {} } if (sigs.length > 0 && SIGNAL_CHANNEL !== 'none') { const t = GS.totalWins + GS.totalLosses; try { await bot.sendMessage(SIGNAL_CHANNEL, '🤖 *K9 • ' + new Date().toLocaleString() + '*\n\n' + sigs.map(s => freeSignal(s)).join('\n\n') + '\n\n📊 ' + GS.totalSignals + ' signals | ' + (t > 0 ? ((GS.totalWins / t) * 100).toFixed(1) : '--') + '% WR\n💎 @K9sigbot — $249/mo', { parse_mode: 'Markdown' }); } catch (e) {} } }
+async function broadcast() { const sigs = []; for (const sym of PRIORITY_PAIRS) { try { const s = await genSignal(sym, 'crypto'); if (s) sigs.push(s); } catch (e) {} } if (sigs.length > 0 && SIGNAL_CHANNEL !== 'none') { const t = GS.totalWins + GS.totalLosses; try { await bot.sendMessage(SIGNAL_CHANNEL, '🤖 *K9 • ' + new Date().toLocaleString() + '*\n\n' + sigs.map(s => freeSignal(s)).join('\n\n') + '\n\n📊 ' + GS.totalSignals + ' signals | ' + (t > 0 ? ((GS.totalWins / t) * 100).toFixed(1) : '--') + '% WR\n💎 @K9sigbot — $249/mo\n\n🔐 K9 SignalBot • Verified Consensus Engine', { parse_mode: 'Markdown' }); } catch (e) {} } }
 
 const CM = { reply_markup: { keyboard: [['📊 BTC Signal', '📊 ETH Signal', '📊 SOL Signal'], ['📈 STOCKS ▶️', '🥇 METALS ▶️', '🔍 Search Coin'], ['📋 My Positions', '📈 Performance', '📊 Global Stats'], ['🎲 Polymarket', '📰 Forex News', '💎 Plans & Pay'], ['📊 Dashboard']], resize_keyboard: true, persistent: true } };
 const SM = { reply_markup: { keyboard: [['📈 AAPL', '📈 TSLA', '📈 NVDA'], ['📈 MSFT', '📈 GOOGL', '📈 AMZN'], ['📈 META', '📈 SPY', '📈 QQQ'], ['📈 AMD', '◀️ BACK TO MAIN', '📊 Dashboard']], resize_keyboard: true, persistent: true } };
 const MM = { reply_markup: { keyboard: [['🥇 GOLD', '🥇 SILVER', '🥇 PLATINUM'], ['🥇 PALLADIUM', '🥇 COPPER', '◀️ BACK TO MAIN'], ['📊 Dashboard']], resize_keyboard: true, persistent: true } };
 const COINS = { btc: 'BTCUSDT', eth: 'ETHUSDT', sol: 'SOLUSDT', doge: 'DOGEUSDT', xrp: 'XRPUSDT', ada: 'ADAUSDT', pepe: 'PEPEUSDT', shib: 'SHIBUSDT', bonk: 'BONKUSDT', wif: 'WIFUSDT', aave: 'AAVEUSDT', ltc: 'LTCUSDT', sui: 'SUIUSDT', sei: 'SEIUSDT', inj: 'INJUSDT', tia: 'TIAUSDT', rune: 'RUNEUSDT' };
 
-bot.onText(/\/start/, msg => { const uid = msg.from?.id; if (!isAuth(uid)) return bot.sendMessage(msg.chat.id, '⛔ Unauthorized'); bot.sendMessage(msg.chat.id, '🤖 *K9 SignalBot v9*\n\n🎯 True Multi-TF Consensus\n⏱ 5M•15M•1H•4H real klines\n⏱ TP time estimates\n₿ Crypto • 📈 Stocks • 🥇 Metals\n🔁 Retry logic • 💾 Persistent DB\n📡 Free: @k9signalalerts\n\n👇 Menu:', { parse_mode: 'Markdown', ...CM }); });
-bot.onText(/\/signal(?:\s+(.+))?/, async (msg, match) => { const uid = msg.from?.id; if (!isAuth(uid)) return; const input = match?.[1]; if (!input) return bot.sendMessage(msg.chat.id, '/signal btc | eth | sol | aapl | tsla | gold | silver', { parse_mode: 'Markdown' }); let sym = input.toUpperCase(); if (METALS.includes(sym) || METAL_ALIASES[input.toLowerCase()]) { const mSym = METAL_ALIASES[input.toLowerCase()] || sym; const s = await genMetalSignal(mSym); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (TOP_STOCKS.includes(sym)) { const s = await genStockSignal(sym); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (!sym.endsWith('USDT')) sym = COINS[input.toLowerCase()] || sym + 'USDT'; const s = await genCryptoSignal(sym); if (!s) return bot.sendMessage(msg.chat.id, '⚪ *No Clear Signal*', { parse_mode: 'Markdown' }); bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); });
+bot.onText(/\/start/, msg => { const uid = msg.from?.id; if (!isAuth(uid)) return bot.sendMessage(msg.chat.id, '⛔ Unauthorized'); bot.sendMessage(msg.chat.id, '🤖 *K9 SignalBot v10*\n\n🎯 True Multi-TF Consensus\n⏱ 5M•15M•1H•4H real klines\n⏱ ATR-based TP time estimates\n₿ Crypto • 📈 Stocks • 🥇 Metals\n🔁 Rate-limited retry logic\n🕐 Market hours guard (stocks/metals)\n💾 Persistent DB\n📡 Free: @k9signalalerts\n\n👇 Menu:', { parse_mode: 'Markdown', ...CM }); });
+bot.onText(/\/signal(?:\s+(.+))?/, async (msg, match) => { const uid = msg.from?.id; if (!isAuth(uid)) return; const input = match?.[1]; if (!input) return bot.sendMessage(msg.chat.id, '/signal btc | eth | sol | aapl | tsla | gold | silver', { parse_mode: 'Markdown' }); let sym = input.toUpperCase(); if (METAL_ALIASES[input.toLowerCase()]) { const mSym = METAL_ALIASES[input.toLowerCase()]; const meta = METALS.find(m => m.symbol === mSym); const s = await genSignal(mSym, 'metal', meta); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (TOP_STOCKS.includes(sym)) { const s = await genSignal(sym, 'stock'); if (s) bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); return; } if (!sym.endsWith('USDT')) sym = COINS[input.toLowerCase()] || sym + 'USDT'; const s = await genSignal(sym, 'crypto'); if (!s) return bot.sendMessage(msg.chat.id, '⚪ *No Clear Signal*', { parse_mode: 'Markdown' }); bot.sendMessage(msg.chat.id, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); });
 bot.onText(/\/adduser (\d+)/, (msg, match) => { const uid = msg.from?.id; if (!ADMIN_IDS.includes(uid)) return; const nid = parseInt(match[1]); const cur = process.env.ALLOWED_IDS || ''; const up = cur ? cur + ',' + nid : String(nid); let env = fs.readFileSync('.env', 'utf8'); env = env.includes('ALLOWED_IDS=') ? env.replace(/ALLOWED_IDS=.*/, 'ALLOWED_IDS=' + up) : env + '\nALLOWED_IDS=' + up; fs.writeFileSync('.env', env); ALLOWED_IDS.push(nid); bot.sendMessage(msg.chat.id, '✅ User ' + nid + ' added!'); });
 
 bot.on('message', async msg => { const uid = msg.from?.id; if (!isAuth(uid)) return; const t = msg.text || '', cid = msg.chat.id; if (t.startsWith('/')) return;
-  if (t.includes('GOLD') || t.includes('SILVER') || t.includes('PLATINUM') || t.includes('PALLADIUM') || t.includes('COPPER')) { const metalMap = { GOLD: 'XAUUSD', SILVER: 'XAGUSD', PLATINUM: 'XPTUSD', PALLADIUM: 'XPDUSD', COPPER: 'XCUUSD' }; const mSym = Object.keys(metalMap).find(k => t.toUpperCase().includes(k)); if (mSym && metalMap[mSym]) { const s = await genMetalSignal(metalMap[mSym]); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); } }
-  else if (TOP_STOCKS.some(s => t.includes(s) && t.includes('📈'))) { const sym = TOP_STOCKS.find(s => t.includes(s)); if (sym) { const s = await genStockSignal(sym); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); } }
-  else if (t.includes('BTC Signal') || t.includes('ETH Signal') || t.includes('SOL Signal')) { let sym = 'BTCUSDT'; if (t.includes('ETH')) sym = 'ETHUSDT'; else if (t.includes('SOL')) sym = 'SOLUSDT'; const s = await genCryptoSignal(sym); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); else bot.sendMessage(cid, '⚪ *No Clear Signal*', { parse_mode: 'Markdown' }); }
-  else if (t.includes('STOCKS ▶️')) { bot.sendMessage(cid, '📈 *Stocks — Twelve Data*\n\n⏱ 5M•15M•1H consensus\n✅ RSI•MACD•S/R•Supertrend•EMA\n\nSelect:', { parse_mode: 'Markdown', ...SM }); }
-  else if (t.includes('METALS ▶️')) { bot.sendMessage(cid, '🥇 *Metals — Twelve Data*\n\n⏱ 5M•15M•1H consensus\n✅ RSI•MACD•S/R•Supertrend•EMA\n\nSelect:', { parse_mode: 'Markdown', ...MM }); }
+  if (t.includes('GOLD') || t.includes('SILVER') || t.includes('PLATINUM') || t.includes('PALLADIUM') || t.includes('COPPER')) { const mm = { GOLD: 'XAUUSD', SILVER: 'XAGUSD', PLATINUM: 'XPTUSD', PALLADIUM: 'XPDUSD', COPPER: 'XCUUSD' }; const mSym = Object.keys(mm).find(k => t.toUpperCase().includes(k)); if (mSym && mm[mSym]) { const meta = METALS.find(m => m.symbol === mm[mSym]); const s = await genSignal(mm[mSym], 'metal', meta); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); } }
+  else if (TOP_STOCKS.some(s => t.includes(s) && t.includes('📈'))) { const sym = TOP_STOCKS.find(s => t.includes(s)); if (sym) { const s = await genSignal(sym, 'stock'); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }]] } }); } }
+  else if (t.includes('BTC Signal') || t.includes('ETH Signal') || t.includes('SOL Signal')) { let sym = 'BTCUSDT'; if (t.includes('ETH')) sym = 'ETHUSDT'; else if (t.includes('SOL')) sym = 'SOLUSDT'; const s = await genSignal(sym, 'crypto'); if (s) bot.sendMessage(cid, fullSignal(s), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Trade 10%', callback_data: 'exec_' + s.id + '_10' }, { text: '✅ Trade 25%', callback_data: 'exec_' + s.id + '_25' }], [{ text: '🎯 TP1 Hit', callback_data: 'tp_' + s.id }, { text: '🛑 SL Hit', callback_data: 'sl_' + s.id }]] } }); else bot.sendMessage(cid, '⚪ *No Clear Signal*', { parse_mode: 'Markdown' }); }
+  else if (t.includes('STOCKS ▶️')) { bot.sendMessage(cid, '📈 *Stocks — Live Market*\n\n⏱ 5M•15M•1H consensus\n✅ RSI•MACD•S/R•Supertrend•EMA\n🕐 NYSE hours only\n\nSelect:', { parse_mode: 'Markdown', ...SM }); }
+  else if (t.includes('METALS ▶️')) { bot.sendMessage(cid, '🥇 *Metals — London/NY Session*\n\n⏱ 5M•15M•1H consensus\n✅ RSI•MACD•S/R•Supertrend•EMA\n🕐 Best spreads 8AM-5PM ET\n\nSelect:', { parse_mode: 'Markdown', ...MM }); }
   else if (t.includes('BACK TO MAIN')) { bot.sendMessage(cid, '🤖 *Main Menu*\n\nSelect:', { parse_mode: 'Markdown', ...CM }); }
   else if (t.includes('Search Coin')) { bot.sendMessage(cid, '🔍 /signal btc | eth | sol | doge | pepe | aapl | tsla | gold | silver', { parse_mode: 'Markdown' }); }
   else if (t.includes('My Positions')) { const st = loadUser(uid); bot.sendMessage(cid, st.positions && st.positions.length > 0 ? '📊 *Positions*\n\n' + st.positions.map((x, i) => (i + 1) + '. ' + x.direction + ' ' + x.symbol + ' @ $' + x.entry).join('\n') : '📊 No open positions.', { parse_mode: 'Markdown' }); }
@@ -258,4 +281,4 @@ app.get('/dashboard/:uid', (req, res) => { if (!isAuth(parseInt(req.params.uid))
 
 async function updatePrices() { for (const s of PRIORITY_PAIRS) { const p = await getPrice(s); if (p) { if (!GS.marketData) GS.marketData = {}; GS.marketData[s] = { price: p }; } } io.emit('priceUpdate', GS.marketData || {}); }
 
-server.listen(PORT, '0.0.0.0', () => { console.log('K9 SignalBot v9 running on port ' + PORT); broadcast(); setInterval(broadcast, 15 * 60 * 1000); setInterval(updatePrices, 5000); updatePrices(); });
+server.listen(PORT, '0.0.0.0', () => { console.log('K9 SignalBot v10 running on port ' + PORT); broadcast(); setInterval(broadcast, 15 * 60 * 1000); setInterval(updatePrices, 5000); updatePrices(); });
