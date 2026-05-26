@@ -21,7 +21,8 @@ const TOP_STOCKS = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'SP
 if (!fs.existsSync('./state')) fs.mkdirSync('./state');
 if (!fs.existsSync('./stats')) fs.mkdirSync('./stats');
 
-const bot = new TelegramBot(token, { polling: true });
+const bot = new TelegramBot(token, { webHook: { port: PORT } });
+bot.setWebHook(process.env.WEBHOOK_URL + "/bot" + token);
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
