@@ -48,7 +48,23 @@ async function getOpenInterest(s) { try { const r = await axios.get('https://fap
 
 // ============ YAHOO STOCKS ============
 async function getStockPrice(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); return r.data.chart.result[0].meta.regularMarketPrice; } catch (e) { return null; } }
-async function getStockData(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: q.close.filter(c => c !== null), highs: q.high.filter(h => h !== null), lows: q.low.filter(l => l !== null) }; } catch (e) { return { closes: [], highs: [], lows: [] }; } }
+async function async function getStockData(s) { 
+  try { 
+    const r = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/" + s, { 
+      params: { interval: "5m", range: "1d" }, 
+      timeout: 5000, 
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" } 
+    }); 
+    const q = r.data.chart.result[0].indicators.quote[0]; 
+    const closes = (q.close || []).filter(c => c !== null); 
+    const highs = (q.high || []).filter(h => h !== null); 
+    const lows = (q.low || []).filter(l => l !== null); 
+    return { closes: closes, highs: highs, lows: lows }; 
+  } catch (e) { 
+    console.log("Stock data error:", e.message); 
+    return { closes: [], highs: [], lows: [] }; 
+  } 
+}getStockData(s) { try { const r = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/' + s, { params: { interval: '5m', range: '1d' }, timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }); const q = r.data.chart.result[0].indicators.quote[0]; return { closes: q.close.filter(c => c !== null), highs: q.high.filter(h => h !== null), lows: q.low.filter(l => l !== null) }; } catch (e) { return { closes: [], highs: [], lows: [] }; } }
 
 // ============ FOREX & POLYMARKET ============
 async function fetchForex() { try { const r = await axios.get('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { timeout: 5000 }); const events = []; const today = new Date(); if (Array.isArray(r.data)) { r.data.forEach(e => { const d = new Date(e.date || ''); if (Math.abs(d - today) < 86400000) events.push({ title: e.title || 'Event', country: e.country || 'USD', time: e.time || '', impact: e.impact || 'Medium', forecast: e.forecast || '', previous: e.previous || '' }); }); } return events; } catch (e) { return []; } }
