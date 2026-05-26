@@ -11,7 +11,7 @@ const crypto = require('crypto');
 // ============ CONFIG ============
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error('Missing TELEGRAM_BOT_TOKEN');
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 100000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const BTC_WALLET = 'bc1q772uueqj2zev3vrc4hmvm8stnc3zksed0p4hmk';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number).filter(Boolean);
