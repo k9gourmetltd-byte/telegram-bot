@@ -204,129 +204,14 @@ bot.on('callback_query', async q => { const uid = q.from.id; if (!isAuth(uid)) r
   else if (d.startsWith('sl_')) { state.stats.l++; state.stats.s = 0; state.stats.p -= 1.2; saveUser(uid, state); GS.totalLosses++; GS.totalSignals++; saveGS(GS); bot.answerCallbackQuery(q.id, { text: '🛑 SL -1.2%' }); bot.sendMessage(cid, '🛑 *SL Hit* -1.2%\nStreak reset\n📊 Global stats updated', { parse_mode: 'Markdown' }); }
   else { bot.answerCallbackQuery(q.id); } });
 
-app.get("/dashboard/:uid", (req, res) => {
-  if (!isAuth(parseInt(req.params.uid))) return res.status(403).send("Unauthorized");
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>K9 SignalBot — Live Dashboard</title>
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-:root{--bg:#060b10;--bg2:#0d1520;--bg3:#131d2a;--bg4:#1a2738;--border:rgba(255,255,255,0.06);--text:#e8edf3;--text2:#8899b4;--text3:#4a5d78;--accent:#F0B90B;--green:#00d4aa;--red:#ff4757;--amber:#f0a840;--purple:#a78bfa;--radius:12px;--shadow:0 4px 24px rgba(0,0,0,0.3)}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:Inter,sans-serif;min-height:100vh}
-.app{max-width:1400px;margin:0 auto;padding:20px}
-.header{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px 28px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;box-shadow:var(--shadow)}
-.header h1{font-size:20px;font-weight:700}
-.header-badge{font-size:11px;padding:6px 14px;border-radius:20px;font-weight:500}
-.badge-live{background:rgba(0,212,170,0.1);color:var(--green);border:1px solid rgba(0,212,170,0.2)}
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
-.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);text-align:center}
-.stat-icon{font-size:28px;margin-bottom:8px}
-.stat-value{font-size:32px;font-weight:700}
-.stat-label{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-top:4px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}
-.panel-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
-.panel-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
-.panel-badge{font-size:10px;padding:3px 10px;border-radius:12px;background:var(--bg4);color:var(--text2)}
-.signal-card{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px}
-.signal-card .sig-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.signal-card .sig-symbol{font-weight:600;font-size:14px}
-.signal-card .sig-direction{font-size:11px;padding:4px 10px;border-radius:4px;font-weight:500}
-.dir-long{background:rgba(0,212,170,0.1);color:var(--green)}
-.dir-short{background:rgba(255,71,87,0.1);color:var(--red)}
-.signal-card .sig-details{font-size:11px;color:var(--text2);line-height:1.8}
-.signal-card .sig-score{font-weight:700;font-size:18px}
-.score-high{color:var(--green)}
-.score-mid{color:var(--accent)}
-.score-low{color:var(--red)}
-.position-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px}
-.pnl-pos{color:var(--green);font-weight:600}
-.pnl-neg{color:var(--red);font-weight:600}
-.price-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
-.price-symbol{font-weight:600}
-.price-value{font-weight:500;color:var(--accent)}
-.empty-state{text-align:center;padding:40px;color:var(--text3)}
-.empty-icon{font-size:48px;margin-bottom:12px}
-.pulse{animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-.tf-row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
-.tf-badge{font-size:10px;padding:4px 8px;border-radius:4px;font-weight:500}
-.tf-bullish{background:rgba(0,212,170,0.1);color:var(--green)}
-.tf-bearish{background:rgba(255,71,87,0.1);color:var(--red)}
-.tf-neutral{background:rgba(240,168,64,0.1);color:var(--amber)}
-@media(max-width:768px){.stats-row{grid-template-columns:1fr 1fr}.grid{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<div class="app">
-  <div class="header">
-    <div><h1>🤖 K9 SignalBot</h1><div style="font-size:11px;color:var(--text2);">Professional Trading Dashboard</div></div>
-    <span class="header-badge badge-live"><span class="pulse" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:6px;"></span>Live</span>
-  </div>
-  <div class="stats-row">
-    <div class="stat-card"><div class="stat-icon">📊</div><div class="stat-value green" id="totalTrades">0</div><div class="stat-label">Total Trades</div></div>
-    <div class="stat-card"><div class="stat-icon">✅</div><div class="stat-value green" id="wins">0</div><div class="stat-label">Wins</div></div>
-    <div class="stat-card"><div class="stat-icon">❌</div><div class="stat-value red" id="losses">0</div><div class="stat-label">Losses</div></div>
-    <div class="stat-card"><div class="stat-icon">🎯</div><div class="stat-value accent" id="winRate">0%</div><div class="stat-label">Win Rate</div></div>
-  </div>
-  <div class="grid">
-    <div class="panel" style="grid-row:span 2">
-      <div class="panel-header"><span class="panel-title">🧠 Active Signals</span><span class="panel-badge" id="signalCount">0</span></div>
-      <div id="signalsList"><div class="empty-state"><div class="empty-icon">📡</div><div>No signals generated yet</div><div style="font-size:11px;margin-top:4px;">Tap 📊 BTC Signal on Telegram</div></div></div>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">📊 Open Positions</span><span class="panel-badge" id="positionCount">0</span></div>
-      <div id="positionsList"><div class="empty-state"><div class="empty-icon">📋</div><div>No open positions</div></div></div>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">🌐 Global Stats</span></div>
-      <div id="globalStats"><div class="empty-state"><div class="empty-icon">🌍</div><div>Loading...</div></div></div>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">💰 Live Prices</span><span class="panel-badge">3s</span></div>
-      <div id="pricesList"><div class="empty-state"><div class="empty-icon">💱</div><div>Loading...</div></div></div>
-    </div>
-  </div>
-</div>
-<script>
-const socket=io();
-const uid="${req.params.uid}";
-socket.on("stateUpdate-"+uid,s=>{
-  if(s.stats){const st=s.stats,t=st.w+st.l;
-    document.getElementById("totalTrades").textContent=st.t||0;
-    document.getElementById("wins").textContent=st.w||0;
-    document.getElementById("losses").textContent=st.l||0;
-    document.getElementById("winRate").textContent=(t>0?((st.w/t)*100).toFixed(1):"0")+"%";}
-  if(s.signals){document.getElementById("signalCount").textContent=s.signals.length;
-    document.getElementById("signalsList").innerHTML=s.signals.slice(0,10).map(x=>{
-      const stars=x.score>=65?"★★★":x.score>=45?"★★":"★";
-      const tfBadges=[x.tf5m,x.tf15m,x.tf1h,x.tf4h].filter(t=>t&&t.bias&&t.bias!=="--"&&t.bias!=="N/A").map(t=>{const cls=t.bias.includes("BULLISH")?"tf-bullish":t.bias.includes("BEARISH")?"tf-bearish":"tf-neutral";return `<span class="tf-badge ${cls}">${t.emoji} ${t.label}: ${t.bias}</span>`;}).join("");
-      return `<div class="signal-card">
-        <div class="sig-header">
-          <span class="sig-symbol">${x.direction==="LONG"?"🟢":"🔴"} ${x.symbol} ${x.direction}</span>
-          <span class="sig-score ${x.score>=70?"score-high":x.score>=45?"score-mid":"score-low"}">${stars} ${x.score}/95</span>
-        </div>
-        <div class="sig-details">
-          💰 $${x.price} → 🎯 Entry: $${x.entry}<br>
-          📈 TP1: $${x.tp1} | TP2: $${x.tp2} | TP3: $${x.tp3}<br>
-          🛑 SL: $${x.sl} | R:R 1:${x.rr1}<br>
-          📊 RSI: ${x.rsi1h} | MACD: ${x.macd?.trend||"--"} | S/R: $${x.sr?.support||"--"}/$${x.sr?.resistance||"--"}<br>
-          <div class="tf-row">${tfBadges}</div>
-          ${x.reasons?`💡 ${x.reasons.slice(0,4).join(" • ")}`:""}
-        </div>
-      </div>`;
-    }).join("")||"<div class=\"empty-state\"><div class=\"empty-icon\">📡</div><div>No signals yet</div></div>";}
-  if(s.positions){document.getElementById("positionCount").textContent=s.positions.length;
-    document.getElementById("positionsList").innerHTML=s.positions.length?s.positions.map(p=>`<div class="position-row"><span>${p.direction} ${p.symbol} @ $${p.entry} (${p.size}%)</span><span class="${(p.pnlPercent||0)>=0?"pnl-pos":"pnl-neg"}">${(p.pnlPercent||0)>=0?"+":""}${(p.pnlPercent||0).toFixed(2)}%</span></div>`).join(""):"<div class=\"empty-state\"><div class=\"empty-icon\">📋</div><div>No open positions</div></div>";}
-});
 fetch("/api/globalstats").then(r=>r.json()).then(g=>{const t=(g.totalWins||0)+(g.totalLosses||0);document.getElementById("globalStats").innerHTML=`<div style="text-align:center"><div style="font-size:32px;font-weight:700;color:var(--accent);">${g.totalSignals||0}</div><div style="font-size:11px;color:var(--text2);">Total Signals</div><div style="margin-top:12px;font-size:14px;"><span class="green">${g.totalWins||0} Wins</span> • <span class="red">${g.totalLosses||0} Losses</span></div><div style="margin-top:4px;font-size:18px;font-weight:600;color:var(--accent);">${t>0?((g.totalWins/t)*100).toFixed(1):"--"}% WR</div></div>`;});
 socket.on("priceUpdate",p=>{let h="";for(const[k,v]of Object.entries(p||{}))h+=`<div class="price-row"><span class="price-symbol">${k}</span><span class="price-value">$${(v.price?.toFixed(2)||"--")}</span></div>`;document.getElementById("pricesList").innerHTML=h||"<div class=\"empty-state\"><div>Loading prices...</div></div>";});
 </script>
 </body>
 </html>`);
+});
+
+app.get('/dashboard/:uid', (req, res) => {
+  if (!isAuth(parseInt(req.params.uid))) return res.status(403).send('Unauthorized');
+  res.send('<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>K9 SignalBot</title><script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"><style>:root{--bg:#060b10;--bg2:#0d1520;--bg3:#131d2a;--bg4:#1a2738;--border:rgba(255,255,255,0.06);--text:#e8edf3;--text2:#8899b4;--accent:#F0B90B;--green:#00d4aa;--red:#ff4757;--amber:#f0a840;--radius:12px;--shadow:0 4px 24px rgba(0,0,0,0.3)}*{box-sizing:border-box;margin:0;padding:0}body{background:var(--bg);color:var(--text);font-family:Inter,sans-serif}.app{max-width:1400px;margin:0 auto;padding:20px}.header{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px 28px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;box-shadow:var(--shadow)}.header h1{font-size:20px;font-weight:700}.badge-live{font-size:11px;padding:6px 14px;border-radius:20px;background:rgba(0,212,170,0.1);color:var(--green);border:1px solid rgba(0,212,170,0.2)}.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);text-align:center}.stat-value{font-size:32px;font-weight:700}.stat-label{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-top:4px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}.panel-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text2);margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}.signal-card{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px}.sig-symbol{font-weight:600;font-size:14px}.dir-long{color:var(--green)}.dir-short{color:var(--red)}.sig-details{font-size:11px;color:var(--text2);line-height:1.8;margin-top:6px}.sig-score{font-weight:700;font-size:16px;margin-top:4px}.pos-row,.price-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px}.green{color:var(--green)}.red{color:var(--red)}.accent{color:var(--accent)}.empty{text-align:center;padding:40px;color:var(--text3)}.pulse{animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}@media(max-width:768px){.stats-row{grid-template-columns:1fr 1fr}.grid{grid-template-columns:1fr}}</style></head><body><div class="app"><div class="header"><div><h1>🤖 K9 SignalBot</h1><div style="font-size:11px;color:var(--text2);">Professional Trading Dashboard</div></div><span class="badge-live"><span class="pulse" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:6px;"></span>Live</span></div><div class="stats-row"><div class="stat-card"><div class="stat-value green" id="tT">0</div><div class="stat-label">Total Trades</div></div><div class="stat-card"><div class="stat-value green" id="tW">0</div><div class="stat-label">Wins</div></div><div class="stat-card"><div class="stat-value red" id="tL">0</div><div class="stat-label">Losses</div></div><div class="stat-card"><div class="stat-value accent" id="tWR">0%</div><div class="stat-label">Win Rate</div></div></div><div class="grid"><div class="panel"><div class="panel-title">🧠 Active Signals</div><div id="signals"><div class="empty">No signals yet</div></div></div><div class="panel"><div class="panel-title">📊 Open Positions</div><div id="positions"><div class="empty">No positions</div></div></div><div class="panel"><div class="panel-title">🌐 Global Stats</div><div id="global"><div class="empty">Loading...</div></div></div><div class="panel"><div class="panel-title">💰 Live Prices</div><div id="prices"><div class="empty">Loading...</div></div></div></div></div><script>const s=io();s.on("stateUpdate-' + req.params.uid + '",st=>{if(st.stats){const x=st.stats,t=x.w+x.l;document.getElementById("tT").textContent=x.t||0;document.getElementById("tW").textContent=x.w||0;document.getElementById("tL").textContent=x.l||0;document.getElementById("tWR").textContent=(t>0?((x.w/t)*100).toFixed(1):"0")+"%";}if(st.signals){document.getElementById("signals").innerHTML=st.signals.slice(0,8).map(x=>{const stars=x.score>=65?"★★★":x.score>=45?"★★":"★";return "<div class=signal-card><div style=display:flex;justify-content:space-between;align-items:center;><span class=sig-symbol>"+(x.direction=="LONG"?"🟢":"🔴")+" "+x.symbol+" <span class="+(x.direction=="LONG"?"dir-long":"dir-short")+">"+x.direction+"</span></span><span class=sig-score style=color:"+(x.score>=70?"var(--green)":x.score>=45?"var(--accent)":"var(--red)")+">"+stars+" "+x.score+"/95</span></div><div class=sig-details>💰 $"+x.price+" → 🎯 Entry: $"+x.entry+"<br>📈 TP1: $"+x.tp1+" | TP2: $"+x.tp2+" | TP3: $"+x.tp3+"<br>🛑 SL: $"+x.sl+" | R:R 1:"+x.rr1+"<br>📊 RSI: "+x.rsi1h+" | MACD: "+(x.macd?x.macd.trend:"--")+" | S/R: $"+(x.sr?x.sr.support:"--")+"/$"+(x.sr?x.sr.resistance:"--")+"<br>💡 "+(x.reasons||[]).slice(0,4).join(" • ")+"</div></div>";}).join("")||"<div class=empty>No signals yet</div>";}if(st.positions){document.getElementById("positions").innerHTML=st.positions.length?st.positions.map(p=>"<div class=pos-row><span>"+p.direction+" "+p.symbol+" @ $"+p.entry+" ("+p.size+"%)</span><span class="+((p.pnlPercent||0)>=0?"green":"red")+">"+((p.pnlPercent||0)>=0?"+":"")+(p.pnlPercent||0).toFixed(2)+"%</span></div>").join(""):"<div class=empty>No positions</div>";}});fetch("/api/globalstats").then(r=>r.json()).then(g=>{const t=(g.totalWins||0)+(g.totalLosses||0);document.getElementById("global").innerHTML="<div style=text-align:center><div style=font-size:32px;font-weight:700;color:var(--accent);>"+(g.totalSignals||0)+"</div><div style=font-size:11px;color:var(--text2);>Total Signals</div><div style=margin-top:12px;><span class=green>"+(g.totalWins||0)+" Wins</span> • <span class=red>"+(g.totalLosses||0)+" Losses</span></div><div style=margin-top:4px;font-size:18px;font-weight:600;color:var(--accent);>"+(t>0?((g.totalWins/t)*100).toFixed(1):"--")+"% WR</div></div>";});s.on("priceUpdate",p=>{let h="";for(const[k,v]of Object.entries(p||{}))h+="<div class=price-row><span>"+k+"</span><span style=color:var(--accent)>$"+(v.price?.toFixed(2)||"--")+"</span></div>";document.getElementById("prices").innerHTML=h||"<div class=empty>Loading...</div>";});</script></body></html>');
 });
