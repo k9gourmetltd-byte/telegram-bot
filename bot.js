@@ -48,7 +48,7 @@ let GS = loadGS();
 
 // ============ API HELPERS ============
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-async function fetchWithRetry(url, options, retries = 3) { for (let i = 0; i < retries; i++) { try { return await axios.get(url, { ...options, timeout: (options?.timeout || 5000) * (i + 1) }); } catch (e) { if (i === retries - 1) throw e; await new Promise(r => setTimeout(r, 1000 * (i + 1))); } } }
+async function fetchWithRetry(url, options, retries = 3) { for (let i = 0; i < retries; i++) { try { return await axios.get(url, { ...options, timeout: (options?.timeout || 5000) * (i + 1) }); } catch (e) { if (i === retries - 1) throw e; await new Promise(r => setTimeout(r, 10000 * (i + 1))); } } }
 
 // ============ BINANCE API (Crypto) ============
 async function getPrice(s) { try { const r = await fetchWithRetry('https://api.binance.com/api/v3/ticker/price?symbol=' + s); return parseFloat(r.data.price); } catch (e) { return null; } }
@@ -241,4 +241,4 @@ app.get('/api/globalstats', (req, res) => res.json(GS));
 async function updatePrices() { for (const s of PRIORITY_PAIRS) { const p = await getPrice(s); if (p) { if (!GS.marketData) GS.marketData = {}; GS.marketData[s] = { price: p }; } } io.emit('priceUpdate', GS.marketData || {}); }
 
 // ============ START ============
-server.listen(PORT, '0.0.0.0', () => { console.log('╔══════════════════════════════════╗'); console.log('║  K9 SIGNALBOT v7 — EVERYTHING   ║'); console.log('║  True Multi-TF • No Fallbacks   ║'); console.log('║  Alpha Vantage • Retry Logic    ║'); console.log('║  Persistent DB • Webhook Mode   ║'); console.log('╚══════════════════════════════════╝'); broadcast(); setInterval(broadcast, 15 * 60 * 1000); setInterval(updatePrices, 5000); updatePrices(); });
+server.listen(PORT, '0.0.0.0', () => { console.log('╔══════════════════════════════════╗'); console.log('║  K9 SIGNALBOT v7 — EVERYTHING   ║'); console.log('║  True Multi-TF • No Fallbacks   ║'); console.log('║  Alpha Vantage • Retry Logic    ║'); console.log('║  Persistent DB • Webhook Mode   ║'); console.log('╚══════════════════════════════════╝'); broadcast(); setInterval(broadcast, 15 * 60 * 10000); setInterval(updatePrices, 5000); updatePrices(); });
