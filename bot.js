@@ -113,7 +113,7 @@ function estimateTPTime(s, assetType) { const vol = assetType === 'metal' ? (MET
 async function genSignal(symbol, type, meta, forceConsensus) {
   if (!forceConsensus && !isMarketOpen(type)) return null;
   let price, closes, highs, lows, depth, funding, lsRatio, oi, stats;
-  const minVotes = forceConsensus ? 1 : (type === 'crypto' ? 3 : 2);
+  const minVotes = forceConsensus ? 2 : (type === "crypto" ? 3 : 2);
   
   if (type === 'crypto') {
     const [p, st, k5m, k15m, k1h, k4h, d, f, lr, o] = await Promise.all([getPrice(symbol), get24hr(symbol), getKlines(symbol, '5m', 50), getKlines(symbol, '15m', 30), getKlines(symbol, '1h', 50), getKlines(symbol, '4h', 50), getDepth(symbol), getFunding(symbol), getLSRatio(symbol), getOpenInterest(symbol)]);
