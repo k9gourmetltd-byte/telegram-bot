@@ -223,7 +223,7 @@ async function broadcast() { const sigs = []; for (const sym of PRIORITY_PAIRS) 
 // ============ MENUS ============
 const CM = { reply_markup: { keyboard: [['📊 BTC Signal', '📊 ETH Signal', '📊 SOL Signal'], ['⚠️ /force BTC', '⚠️ /force ETH', '⚠️ /force SOL'], ['📈 STOCKS ▶️', '🥇 METALS ▶️', '🔍 Search Coin'], ['🔍 /diag', '📋 My Positions', '📈 Performance'], ['📊 Global Stats', '🎲 Polymarket', '📰 Forex News'], ['💎 Plans & Pay', '📊 Dashboard']], resize_keyboard: true, persistent: true } };
 const SM = { reply_markup: { keyboard: [['📈 AAPL', '📈 TSLA', '📈 NVDA'], ['📈 MSFT', '📈 GOOGL', '📈 AMZN'], ['📈 META', '📈 SPY', '📈 QQQ'], ['📈 AMD', '◀️ BACK TO MAIN', '📊 Dashboard']], resize_keyboard: true, persistent: true } };
-const MM = { reply_markup: { keyboard: [['🥇 GOLD', '🥇 SILVER', '🥇 PLATINUM'], ['🥇 PALLADIUM', '🥇 COPPER', '◀️ BACK TO MAIN'], ['📊 Dashboard']], resize_keyboard: true, persistent: true } };
+const MM = { reply_markup: { keyboard: [['🥇 GOLD', '🥇 SILVER', '🥇 PLATINUM'], ['🥇 PALLADIUM', '🥇 COPPER', '◀️ BACK TO MAIN'], ["📊 System Status", "📊 Dashboard"]], resize_keyboard: true, persistent: true } };
 const COINS = { btc: 'BTCUSDT', eth: 'ETHUSDT', sol: 'SOLUSDT', doge: 'DOGEUSDT', xrp: 'XRPUSDT', ada: 'ADAUSDT', pepe: 'PEPEUSDT', shib: 'SHIBUSDT', bonk: 'BONKUSDT', wif: 'WIFUSDT', aave: 'AAVEUSDT', ltc: 'LTCUSDT', sui: 'SUIUSDT', sei: 'SEIUSDT', inj: 'INJUSDT', tia: 'TIAUSDT', rune: 'RUNEUSDT' };
 
 // ============ TELEGRAM HANDLERS ============
